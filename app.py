@@ -1,226 +1,204 @@
-# app.py
-import os
+# app.py — Control por voz → MQTT (topic fijo: voice_alejandro)
 import json
 import time
 import platform
-import tempfile
-
+import paho.mqtt.client as mqtt
 import streamlit as st
-from PIL import Image
-import paho.mqtt.client as paho
-
-from bokeh.models import CustomJS
-from bokeh.models.widgets import Button
+from bokeh.models import Button, CustomJS
 from streamlit_bokeh_events import streamlit_bokeh_events
 
-# ----- Opcionales -----
-try:
-    from deep_translator import GoogleTranslator
-    HAS_TRANSLATE = True
-except Exception:
-    HAS_TRANSLATE = False
+# ---------------------------
+# Config & Estilos (Dark UI)
+# ---------------------------
+st.set_page_config(page_title="Voz → MQTT", page_icon="🎙️", layout="centered")
 
-try:
-    from gtts import gTTS
-    HAS_TTS = True
-except Exception:
-    HAS_TTS = False
-
-
-# =========================
-# Configuración de página
-# =========================
-st.set_page_config(page_title="Ctrl Voz · MQTT", page_icon="🎙️", layout="centered")
-
-# =========================
-# Estilos (negro / blanco)
-# =========================
-st.markdown("""
+DARK_CSS = """
 <style>
-/* Base negra + tipografía blanca */
-html, body, [data-testid="stAppViewContainer"] {
-  background: #000 !important;
-  color: #fff !important;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Apple Color Emoji','Segoe UI Emoji';
+/* fondo y tipografía */
+html, body, [data-testid="stAppViewContainer"]{
+  background: #000 !important; color: #fff !important;
 }
-/* Container central más angosto y sin scroll horizontal raro */
-.block-container {max-width: 900px; padding-top: 2rem; padding-bottom: 4rem;}
-/* Inputs y selects */
-input, textarea, select {
-  background: #0d0d0d !important; color: #fff !important; border: 1px solid #222 !important; border-radius: 10px !important;
+h1,h2,h3,h4,h5,p,span,div,label { color:#fff !important; }
+small, .markdown-text-container { color:#ddd !important; }
+
+/* contenedores/paneles */
+.block-container{ padding-top: 2rem; max-width: 880px; }
+.stAlert{ background:#111; border:1px solid #2a2a2a; }
+[data-testid="stSidebar"]{
+  background:#0b0b0b !important; border-right: 1px solid #1a1a1a;
 }
-[data-baseweb="input"] input { color: #fff !important; }
-.stTextInput > div > div > input::placeholder { color:#777; }
-.stNumberInput input { color: #fff !important; }
-/* Botones */
-button[kind="primary"]{
-  background:#fff !important; color:#000 !important; border-radius: 999px !important; border:none !important; font-weight:600;
+
+/* tarjetas */
+.card{
+  background:#0f0f10; border:1px solid #1f1f1f; border-radius:16px;
+  padding:16px 18px; margin:10px 0;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.04) inset;
 }
-button[kind="secondary"]{
-  background:#111 !important; color:#fff !important; border:1px solid #333 !important; border-radius: 999px !important;
+
+/* chips/pills */
+.pill{
+  display:inline-block; padding:6px 10px; border-radius:999px;
+  background:#111; border:1px solid #2a2a2a; color:#e5e5e5;
+  font-size:12px; letter-spacing:.3px;
 }
-button:hover { filter: brightness(0.92); }
-/* Chips */
-.pill {
-  display:inline-block; padding:.35rem .65rem; border:1px solid #333; border-radius:999px; background:#0b0b0b; color:#e5e5e5; font-size:.78rem; margin-right:.3rem;
+
+/* botón primario */
+.stButton > button{
+  background:#111 !important; color:#fff !important;
+  border:1px solid #2a2a2a !important; border-radius:999px !important;
+  padding:10px 18px !important; font-weight:600;
 }
-/* Dividers */
-hr{ border:0; border-top:1px solid #1d1d1d; margin:1.25rem 0; }
-/* Expander */
-.streamlit-expanderHeader{ color:#fff !important; }
+.stButton > button:hover{ background:#151515 !important; }
+
+/* input & select */
+input, textarea{
+  background:#0e0e0f !important; color:#fff !important;
+  border:1px solid #2a2a2a !important; border-radius:10px !important;
+}
 </style>
-""", unsafe_allow_html=True)
+"""
+st.markdown(DARK_CSS, unsafe_allow_html=True)
 
-# =========================
+# ---------------------------
 # Encabezado
-# =========================
-st.markdown("### TELEMETRÍA POR VOZ")
-st.markdown("# 🎙️ Control por Voz → MQTT")
+# ---------------------------
+st.markdown("<span class='pill'>TELEMETRÍA POR VOZ</span>", unsafe_allow_html=True)
+st.title("🎙️ Control de Voz → MQTT")
+
 st.markdown(
-    '<span class="pill">Dark UI</span>'
-    '<span class="pill">Bokeh Speech</span>'
-    '<span class="pill">MQTT</span>'
-    f'<span class="pill">Python {platform.python_version()}</span>',
-    unsafe_allow_html=True
+    "<div class='card'>Habla y enviaremos el texto reconocido en formato JSON al tópico "
+    "<b>voice_alejandro</b> del broker MQTT que elijas. "
+    "Esto funciona en navegadores con <i>Web Speech API</i> (Chrome/Edge).</div>",
+    unsafe_allow_html=True,
 )
-st.write("Habla y publicaremos el texto reconocido en tu tópico MQTT. "
-         "Opcionalmente traducimos a **EN** y/o reproducimos audio.")
 
-st.markdown("---")
-
-# =========================
-# Sidebar: configuración
-# =========================
+# ---------------------------
+# Sidebar (config del broker)
+# ---------------------------
 with st.sidebar:
     st.subheader("⚙️ Conexión MQTT")
     broker = st.text_input("Broker", value="broker.mqttdashboard.com")
-    port = st.number_input("Puerto", min_value=1, max_value=65535, value=1883)
-    topic = st.text_input("Tópico de publicación", value="voice_isabela")
-    client_id = st.text_input("Client ID", value="ctrl-voice-ui")
+    port = st.number_input("Puerto", min_value=1, max_value=65535, value=1883, step=1)
+    client_id = st.text_input("Client ID", value="voice-client")
+    qos = st.selectbox("QoS", [0, 1, 2], index=0)
+    retain = st.checkbox("Retain", value=False)
 
-    st.subheader("🎛️ Procesamiento")
-    do_translate = st.toggle("Traducir a inglés (deep-translator)", value=True if HAS_TRANSLATE else False,
-                             help="Usa deep-translator; si no está instalado, se ignorará.")
-    do_tts = st.toggle("Reproducir audio (gTTS)", value=False,
-                       help="Convierte el texto en voz y lo reproduce en el navegador.")
+# Tópico fijo
+topic = "voice_alejandro"
+st.markdown(f"<span class='pill'>Topic fijo: {topic}</span>", unsafe_allow_html=True)
 
-    st.caption(f"Traducción disponible: {'sí' if HAS_TRANSLATE else 'no'} · TTS disponible: {'sí' if HAS_TTS else 'no'}")
-
-
-# =========================
-# MQTT helpers
-# =========================
-def on_publish(_client, _userdata, _result):
-    # Solo log sencillo a consola del servidor
-    print("Publicado en MQTT")
-
-def publish_mqtt(broker_host: str, port_num: int, topic_name: str, payload: dict, client_name: str):
+# ---------------------------
+# Utilidades MQTT
+# ---------------------------
+def publish_text(text: str) -> tuple[bool, str]:
+    """Publica {"Act1": <texto>} en el tópico fijo; devuelve (ok, msg)."""
+    payload = {"Act1": text.strip()}
     try:
-        c = paho.Client(client_name)
-        c.on_publish = on_publish
-        c.connect(broker_host, int(port_num))
-        rc = c.publish(topic_name, json.dumps(payload), qos=0, retain=False)
-        c.disconnect()
-        return rc.rc == 0, None
+        client = mqtt.Client(client_id=client_id, clean_session=True)
+        client.connect(broker, int(port), keepalive=60)
+        rc, mid = client.publish(topic, json.dumps(payload), qos=int(qos), retain=retain)
+        # Espera breve para asegurar el envío antes de desconectar
+        client.loop_start()
+        time.sleep(0.2)
+        client.loop_stop()
+        client.disconnect()
+        if rc == mqtt.MQTT_ERR_SUCCESS:
+            return True, f"Publicado ✅ → {topic} | {payload}"
+        return False, f"Publicación con código {rc} (revisar conexión/credenciales)"
     except Exception as e:
-        return False, str(e)
+        return False, f"Error publicando: {e}"
 
-
-# =========================
+# ---------------------------
 # Botón de micrófono (Bokeh)
-# =========================
-st.markdown("#### 🎧 Captura por voz")
-st.caption("Pulsa **Iniciar** y habla con pausas breves. Cerrará automáticamente al dejar de hablar.")
+# ---------------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.subheader("🎤 Micrófono")
 
-bokeh_btn = Button(label="▶︎ Iniciar reconocimiento", width=260)
-bokeh_btn.js_on_event("button_click", CustomJS(code="""
-    const rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-    rec.lang = 'es-ES';
-    rec.continuous = true;
-    rec.interimResults = true;
-
-    rec.onresult = (e) => {
-        let said = "";
-        for (let i = e.resultIndex; i < e.results.length; ++i) {
-            if (e.results[i].isFinal) { said += e.results[i][0].transcript + " "; }
+mic_btn = Button(label="Pulsa para dictar", width=240)
+mic_btn.js_on_event(
+    "button_click",
+    CustomJS(
+        code="""
+        // Compatible con Chrome/Edge (webkitSpeechRecognition)
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if(!SR){
+          document.dispatchEvent(new CustomEvent("GET_TEXT", {detail: "__NO_API__"}));
+          return;
         }
-        if (said.trim() !== "") {
-            document.dispatchEvent(new CustomEvent("GET_TEXT", {detail: said.trim()}));
-        }
-    };
-    rec.onerror = (e) => {
-        document.dispatchEvent(new CustomEvent("GET_TEXT", {detail: "__error__:" + (e.message || 'Speech error')}));
-    };
-    rec.start();
-"""))
-
-result = streamlit_bokeh_events(
-    bokeh_btn,
-    events="GET_TEXT",
-    key="voice-listener",
-    refresh_on_update=False,
-    override_height=90,
-    debounce_time=0
+        const r = new SR();
+        r.continuous = true;
+        r.interimResults = true;
+        r.lang = "es-ES";
+        let finalText = "";
+        r.onresult = (e) => {
+          for (let i=e.resultIndex; i<e.results.length; i++){
+            const res = e.results[i];
+            if(res.isFinal){ finalText += res[0].transcript; }
+          }
+          if(finalText.trim().length){
+            document.dispatchEvent(new CustomEvent("GET_TEXT", {detail: finalText}));
+            finalText = "";
+          }
+        };
+        r.onerror = () => {
+          document.dispatchEvent(new CustomEvent("GET_TEXT", {detail: "__ERR__"}));
+        };
+        r.start();
+        """
+    ),
 )
 
-recognized = None
+result = streamlit_bokeh_events(
+    mic_btn,
+    events="GET_TEXT",
+    key="mic",
+    refresh_on_update=False,
+    override_height=90,
+    debounce_time=0,
+)
+st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------------------
+# Procesa resultado del mic
+# ---------------------------
 if result and "GET_TEXT" in result:
-    recognized = result.get("GET_TEXT")
-
-# =========================
-# Post-proceso + MQTT
-# =========================
-if recognized:
-    if recognized.startswith("__error__:"):
-        st.error(f"🎤 Error de reconocimiento: {recognized.split(':',1)[1]}")
+    text = result["GET_TEXT"]
+    if text == "__NO_API__":
+        st.error("Tu navegador no soporta Web Speech API. Prueba con Chrome/Edge.")
+    elif text == "__ERR__":
+        st.error("Ocurrió un error con el reconocimiento de voz.")
     else:
-        st.markdown("#### 📝 Texto reconocido")
-        st.write(f"“{recognized}”")
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("📝 Texto reconocido")
+        st.write(text.strip())
+        ok, msg = publish_text(text)
+        (st.success if ok else st.error)(msg)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        text_to_send = recognized
+# ---------------------------
+# Alternativa: texto manual
+# ---------------------------
+st.markdown("<div class='card'>", unsafe_allow_html=True)
+st.subheader("⌨️ Enviar texto manual")
+manual = st.text_input("Escribe el comando/frase a publicar", "")
+send_btn = st.button("Enviar al tópico")
+if send_btn:
+    if manual.strip():
+        ok, msg = publish_text(manual)
+        (st.success if ok else st.error)(msg)
+    else:
+        st.warning("Escribe algo antes de enviar.")
+st.markdown("</div>", unsafe_allow_html=True)
 
-        # Traducción opcional
-        if do_translate:
-            if HAS_TRANSLATE:
-                try:
-                    text_to_send = GoogleTranslator(source="auto", target="en").translate(text_to_send)
-                    st.write('<span class="pill">Traducido → EN</span>', unsafe_allow_html=True)
-                    st.write(f"“{text_to_send}”")
-                except Exception as e:
-                    st.warning(f"No se pudo traducir: {e}")
-            else:
-                st.info("Instala `deep-translator` para activar traducción.")
-
-        # Publicación MQTT
-        payload = {"Act1": text_to_send}
-        ok, err = publish_mqtt(broker, port, topic, payload, client_id)
-        if ok:
-            st.success(f"📤 Publicado en **{broker} → {topic}**")
-        else:
-            st.error(f"❌ Error publicando MQTT: {err}")
-
-        # TTS opcional
-        if do_tts:
-            if HAS_TTS:
-                try:
-                    # Idioma: si ya tradujimos a EN, voz en inglés; si no, español
-                    tts_lang = "en" if (do_translate and HAS_TRANSLATE) else "es"
-                    speech = gTTS(text=text_to_send, lang=tts_lang)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-                        speech.save(tmp.name)
-                        audio_path = tmp.name
-                    st.audio(audio_path)
-                    st.caption("🔊 Reproduciendo TTS")
-                except Exception as e:
-                    st.warning(f"No se pudo generar audio: {e}")
-            else:
-                st.info("Instala `gTTS` para activar audio (TTS).")
-
-st.markdown("---")
-with st.expander("ℹ️ Ayuda rápida", expanded=False):
-    st.markdown("""
-- **Broker / Puerto / Tópico**: define a dónde publicamos el texto reconocido.
-- **Traducir a inglés**: usa `deep-translator` (evita `googletrans`, que rompe en Python 3.13).
-- **Reproducir audio (gTTS)**: convierte el texto final a voz en el navegador.
-- **Privacidad**: el reconocimiento corre en tu navegador (Web Speech), no subimos el audio.
-    """)
+# ---------------------------
+# Meta/ayuda
+# ---------------------------
+with st.expander("ℹ️ Ayuda / Notas"):
+    st.markdown(
+        f"""
+- **Python**: {platform.python_version()}
+- Publica JSON con la forma `{{"Act1": "…"}}` en **`{topic}`**.
+- Si el micro no funciona, usa el campo de texto manual.
+- Revisa red/puerto (`{port}`) y que el broker acepte conexiones sin TLS.
+        """
+    )
